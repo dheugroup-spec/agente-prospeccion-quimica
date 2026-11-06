@@ -2,16 +2,15 @@ import os
 import json
 import requests
 from bs4 import BeautifulSoup
-from google import genai
-from google.genai import types
 
-# 1. Comprobar la clave de API
-api_key = os.environ.get("GEMINI_API_KEY")
-if not api_key:
+# 1. Obtener la clave API de los secretos
+API_KEY = os.environ.get("GEMINI_API_KEY")
+if not API_KEY:
     print("ERROR CRÍTICO: No se encuentra la variable GEMINI_API_KEY en los secretos.")
     exit(1)
 
-client = genai.Client(api_key=api_key)
+# URL directa de la API de Gemini
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
 
 # 2. Fuentes a monitorizar
 URLS_OBJETIVO = [
@@ -20,34 +19,45 @@ URLS_OBJETIVO = [
 
 SYSTEM_INSTRUCTION = """
 Eres un analista de prospección B2B especializado en la industria química y farmacéutica.
-Tu objetivo es analizar fragmentos de texto e identificar si una empresa busca comprar o solicitar ofertas 
+Tu objetivo es analizar fragmentos de texto e identificar si una empresa o institución busca comprar o solicitar ofertas 
 para materias primas químicas (ceras de polietileno, resinas, dióxido de titanio, pigmentos, excipientes, etc.).
 
-Responde exclusivamente en formato JSON estructurado:
+Responde exclusivamente en formato JSON estructurado sin bloques de código ni markdown:
 {
-  "oportunidad_detectada": true/false,
-  "empresa_o_entidad": "Nombre de la entidad o N/A",
-  "materia_prima_buscada": "Materia prima identificada o N/A",
-  "volumen_o_detalles": "Detalles o N/A",
-  "contacto_o_enlace": "Enlace o N/A"
+  "oportunidad_detectada": false,
+  "empresa_o_entidad": "N/A",
+  "materia_prima_buscada": "N/A",
+  "volumen_o_detalles": "N/A",
+  "contacto_o_enlace": "N/A"
 }
 """
 
 def analizar_contenido(texto_extraido, url_origen):
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": f"{SYSTEM_INSTRUCTION}\n\nAnaliza este texto de {url_origen}:\n{texto_extraido[:3000]}"}
+                ]
+            }
+        ],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "temperature": 0.1
+        }
+    }
+    
     try:
-        prompt = f"Analiza el siguiente contenido extraído de {url_origen}:\n\n{texto_extraido[:3000]}"
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                temperature=0.1
-            )
-        )
-        return json.loads(response.text)
+        response = requests.post(GEMINI_URL, json=payload, timeout=30)
+        if response.status_code != 200:
+            print(f"Error en API Gemini (HTTP {response.status_code}): {response.text}")
+            return {"oportunidad_detectada": False}
+            
+        data = response.json()
+        raw_text = data['candidates'][0]['content']['parts'][0]['text']
+        return json.loads(raw_text)
     except Exception as e:
-        print(f"Error analizando con Gemini en {url_origen}: {e}")
+        print(f"Error procesando la respuesta de Gemini: {e}")
         return {"oportunidad_detectada": False}
 
 def rastrear_fuentes():
@@ -61,7 +71,7 @@ def rastrear_fuentes():
         try:
             res = requests.get(url, headers=headers, timeout=20)
             if res.status_code != 200:
-                print(f"Aviso: La web respondió con código {res.status_code}")
+                print(f"Aviso: La web respondió con código HTTP {res.status_code}")
                 continue
 
             soup = BeautifulSoup(res.text, 'html.parser')
